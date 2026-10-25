@@ -205,6 +205,15 @@ impl Face {
             .as_ref()
             .map(FaceBytes::get)
     }
+    /// The face's file, shared rather than copied: the bytes the database read (or the static
+    /// data), as one more reference to them. None if the file is missing or unreadable.
+    pub fn shared_bytes(&self) -> Option<Arc<dyn AsRef<[u8]> + Send + Sync>> {
+        self.bytes()?;
+        match self.bytes.get()?.as_ref()? {
+            FaceBytes::Static(b) => Some(Arc::new(*b)),
+            FaceBytes::Shared(b) => Some(b.clone()),
+        }
+    }
     /// The parsed font (None if the file is missing or unreadable).
     pub fn font(&self) -> Option<FontRef<'_>> {
         FontRef::from_index(self.bytes()?, self.info.index).ok()

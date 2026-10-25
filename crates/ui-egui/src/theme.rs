@@ -508,11 +508,9 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
             if seen.contains(&id) {
                 continue;
             }
-            let Some(font) = face.font() else { continue };
+            // egui shares the bytes the font database already read: no copy of the file
+            let Some(mut data) = shared(&face) else { continue };
             seen.push(id);
-            // Use the already-read, parsed bytes rather than reading a font file twice.
-            let mut data = FontData::from_owned(font.data().as_bytes().to_vec());
-            data.index = face.info.index;
             let name = if name == "catalog-system" { format!("{name}-{:x}", probe as u32) } else { name.to_string() };
             data.tweak = baseline_tweak(&base_face, &face);
             family_fonts.font_data.insert(name.clone(), Arc::new(data));
@@ -523,6 +521,14 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         }
         names
     }
+}
+
+/// `face` for egui, sharing the bytes the font database keeps for it. A copy of the file
+/// (`font.data().as_bytes().to_vec()`) meant two copies of every fallback face for the life of the
+/// process: the database's and egui's. `None` when the face's file can't be read.
+#[cfg(not(target_arch = "wasm32"))]
+fn shared(face: &effectcraft_text::fonts::Face) -> Option<FontData> {
+    Some(FontData::from_blob(face.shared_bytes()?, face.info.index))
 }
 
 /// The faces the interface asks for before it settles on the one a composed frame renders with.
@@ -935,6 +941,21 @@ mod tests {
         let bytes = font.data().as_bytes();
         let covered = fonts_def.font_data.values().any(|d| d.bytes() == bytes && d.index == face.info.index);
         assert!(covered, "a face covering Hangul must be registered with egui");
+    }
+
+    /// egui shares the font database's bytes for every installed fallback: installing the fonts
+    /// again (another language, another window) hands egui the same bytes, never a copy of the file.
+    #[test]
+    fn fallback_faces_are_shared_not_copied() {
+        let mut first = FontDefinitions::default();
+        let installed = install_script_fallbacks(&mut first, "ja");
+        let mut again = FontDefinitions::default();
+        install_script_fallbacks(&mut again, "ja");
+        for name in &installed {
+            let (Some(a), Some(b)) = (first.font_data.get(name), again.font_data.get(name)) else { panic!("{name} is missing") };
+            assert_eq!(a.bytes().as_ptr(), b.bytes().as_ptr(), "{name}: egui shares the same bytes each install, never a copy");
+        }
+        install_script_fallbacks(&mut first, "system");
     }
 
     #[test]
