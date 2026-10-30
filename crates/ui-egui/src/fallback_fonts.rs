@@ -205,6 +205,9 @@ pub(crate) struct Watch {
     /// The faces read when painted text needs them, in fallback order, for the language named.
     fallbacks: (String, Vec<crate::theme::LazyFallback>),
     settled: Settled,
+    /// The faces read before this context installed them (the faces read are process-wide, so
+    /// another context can read one after these fonts were installed) that it installed since.
+    caught_up: HashSet<&'static str>,
     /// When the last read started, to log how long the redone pass took.
     #[cfg(not(target_arch = "wasm32"))]
     started: Option<std::time::Instant>,
@@ -217,6 +220,7 @@ impl Watch {
             shared_lang: Arc::new(RwLock::new(lang.to_owned())),
             fallbacks: (lang.to_owned(), crate::theme::lazy_fallbacks(lang)),
             settled: Settled::default(),
+            caught_up: HashSet::new(),
             #[cfg(not(target_arch = "wasm32"))]
             started: None,
         }
@@ -271,7 +275,10 @@ impl egui::Plugin for Watch {
             return;
         }
         let fallbacks = &self.fallbacks.1;
-        if fallbacks.iter().all(|f| f.is_read()) {
+        let installed: HashSet<String> = ctx.fonts_mut(|f| f.definitions().font_data.keys().cloned().collect());
+        // a face read (here or by another context) that this context hasn't installed and may need
+        let behind = |f: &crate::theme::LazyFallback| f.is_read() && !installed.contains(f.name()) && !self.caught_up.contains(f.name());
+        if fallbacks.iter().all(|f| f.is_read()) && !fallbacks.iter().any(behind) {
             return;
         }
         let chars = new_characters(&output.shapes, &self.settled);
@@ -282,6 +289,7 @@ impl egui::Plugin for Watch {
         let started = std::time::Instant::now();
         let candidates: Vec<&dyn Candidate> = fallbacks.iter().map(|f| f as &dyn Candidate).collect();
         let mut read = false;
+        let mut catch_up = Vec::new();
         let late: Vec<&str> = fallbacks.iter().map(|f| f.name()).collect();
         for (c, family) in chars {
             // the fonts this pass was laid out with (new ones apply from the next pass)
@@ -293,11 +301,17 @@ impl egui::Plugin for Watch {
                 classify(f.definitions(), &family, c, has_glyph, &late)
             });
             read |= plan(c, drawn, &candidates);
+            // the face that draws `c` was read by another context after this one installed its fonts
+            if let Some(f) = fallbacks.iter().find(|f| f.is_read() && f.covers(c)).filter(|f| behind(f)) {
+                catch_up.push(f.name());
+            }
             self.settled.insert(family, c);
         }
-        if !read {
+        if !read && catch_up.is_empty() {
             return;
         }
+        // once each: a face installed under another name (two scripts sharing one face) stays absent
+        self.caught_up.extend(catch_up);
         crate::theme::install_fonts(ctx, &self.lang);
         #[cfg(not(target_arch = "wasm32"))]
         {

@@ -1011,7 +1011,6 @@ mod script_font_tests {
     /// order, and a Han character after it is still drawn by the Japanese face's place ahead of it.
     #[test]
     fn a_face_read_during_layout_takes_its_place_in_the_fallback_order() {
-        use crate::fallback_fonts::Candidate;
         if !installed('\u{d55c}') || !installed('\u{4e2d}') {
             eprintln!("no Korean or Han system font installed; skipping");
             return;
@@ -1034,14 +1033,48 @@ mod script_font_tests {
         });
         frame("\u{4e2d}\u{6587}");
         frame("\u{4e2d}\u{6587}");
-        let read = |name: &str| super::lazy_fallbacks("en").iter().any(|f| f.name() == name && f.is_read());
-        assert!(read("japanese-system"), "Han in an English interface is drawn by the Japanese face, as before");
-        ctx.fonts_mut(|f| assert!(f.definitions().font_data.contains_key("japanese-system")));
+        // what this context installed, not the process-wide read flags: another test may have read
+        // the Japanese face first
+        ctx.fonts_mut(|f| {
+            let installed = f.definitions().font_data.contains_key("japanese-system");
+            assert!(installed, "Han in an English interface is drawn by the Japanese face, as before: {:?}", f.definitions().font_data.keys());
+        });
     }
 
-    /// #1141: switching the interface to Simplified Chinese drew most labels as boxes. A Japanese face
-    /// can cover the Han probe while lacking other catalog characters. The context must keep its
-    /// own language policy even when another context installs Japanese fallbacks concurrently.
+    /// The faces read are process-wide. A context whose fonts were installed before another one read
+    /// a face installs it once its text needs the face, even when a face later in the order (here
+    /// the Korean one, which has Han too) already draws that text; and a context created after the
+    /// read installs it at once.
+    #[test]
+    fn a_face_read_by_another_context_is_installed_in_this_one() {
+        use crate::fallback_fonts::Candidate;
+        if !installed('\u{d55c}') || !installed('\u{4e2d}') {
+            eprintln!("no Korean or Han system font installed; skipping");
+            return;
+        }
+        let tokens = super::Tokens::for_kind(super::ThemeKind::Dark);
+        let earlier = egui::Context::default();
+        super::install(&earlier, &tokens, "en");
+        let pass = |ctx: &egui::Context, text: &'static str| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.label(text);
+            })
+            .textures_delta
+            .clear();
+        };
+        pass(&earlier, "\u{d55c}\u{ad6d}");
+        pass(&earlier, "\u{d55c}\u{ad6d}");
+        let japanese = super::lazy_fallbacks("en").into_iter().find(|f| f.name() == "japanese-system");
+        assert!(japanese.is_some_and(|f| f.read()), "the Japanese face is read (as another context's text would)");
+        pass(&earlier, "\u{4e2d}\u{6587}");
+        pass(&earlier, "\u{4e2d}\u{6587}");
+        earlier.fonts_mut(|f| assert!(f.definitions().font_data.contains_key("japanese-system"), "{:?}", f.definitions().font_data.keys()));
+        let later = egui::Context::default();
+        super::install(&later, &tokens, "en");
+        pass(&later, "Composition");
+        later.fonts_mut(|f| assert!(f.definitions().font_data.contains_key("japanese-system"), "{:?}", f.definitions().font_data.keys()));
+    }
+
     #[test]
     fn simplified_chinese_interface_draws_simplified_hanzi_after_another_language() {
         let ctx = egui::Context::default();
